@@ -1,0 +1,215 @@
+import re
+import time
+from pathlib import Path
+
+import praw
+from prawcore.exceptions import RequestException, ResponseException, ServerError
+from docx import Document
+
+# ============================
+#   CONFIGURATION
+# ============================
+
+# >>> PUT YOUR CREDENTIALS HERE <<<
+CLIENT_ID = "YOUR_CLIENT_ID"
+CLIENT_SECRET = "YOUR_CLIENT_SECRET"
+USER_AGENT = "depressed_corpus_research_script_by_u_yourusername"
+
+SUBREDDIT_NAME = "depressed"
+
+# Reddit usually caps listing endpoints around ~1000 posts
+PER_LISTING_LIMIT = 1000
+
+# Output files (will be created in the same folder as this script)
+OUTPUT_TXT = Path("depressed_corpus.txt")
+OUTPUT_DOCX = Path("depressed_corpus.docx")
+
+
+# ============================
+#   HELPER FUNCTIONS
+# ============================
+
+def clean_text(text: str) -> str:
+    """
+    Minimal cleaning:
+    - remove URLs
+    - normalise whitespace
+
+    Keeps punctuation, numbers, emojis, etc.
+    You can further clean later during corpus preprocessing.
+    """
+    if not text:
+        return ""
+    # Remove URLs
+    text = re.sub(r"http\S+|www\.\S+", " ", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def safe_sleep(seconds: int):
+    print(f"Sleeping for {seconds} seconds to avoid timeout/rate issues...")
+    time.sleep(seconds)
+
+
+def scrape_listing(subreddit, listing_type: str, time_filter: str = None, limit: int = PER_LISTING_LIMIT):
+    """
+    Get a generator over submissions for a given listing type.
+    listing_type: 'new', 'hot', 'top'
+    time_filter: used only for 'top' (e.g., 'all', 'year', 'month', 'week')
+    """
+    if listing_type == "new":
+        return subreddit.new(limit=limit)
+    elif listing_type == "hot":
+        return subreddit.hot(limit=limit)
+    elif listing_type == "top":
+        if time_filter is None:
+            time_filter = "all"
+        return subreddit.top(time_filter=time_filter, limit=limit)
+    else:
+        raise ValueError(f"Unknown listing_type: {listing_type}")
+
+
+# ============================
+#   MAIN SCRAPER
+# ============================
+
+def scrape_subreddit():
+    reddit = praw.Reddit(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        user_agent=USER_AGENT,
+    )
+    subreddit = reddit.subreddit(SUBREDDIT_NAME)
+
+    all_text_chunks = []
+    seen_ids = set()  # for deduplicating submissions across listings (only in memory)
+
+    # Multiple listing strategies to increase coverage
+    listing_configs = [
+        ("new", None),
+        ("hot", None),
+        ("top", "all"),
+        ("top", "year"),
+        ("top", "month"),
+        ("top", "week"),
+    ]
+
+    thread_counter = 0
+
+    for listing_type, tf in listing_configs:
+        print(f"\n=== Scraping listing: {listing_type} (time_filter={tf}) ===")
+        try:
+            submissions = scrape_listing(subreddit, listing_type, tf, limit=PER_LISTING_LIMIT)
+        except Exception as e:
+            print(f"Error creating submissions generator for {listing_type}, {tf}: {e}")
+            continue
+
+        for submission in submissions:
+            # Deduplicate by submission.id (we do NOT write IDs into the corpus)
+            if submission.id in seen_ids:
+                continue
+            seen_ids.add(submission.id)
+
+            thread_counter += 1
+            print(f"[{listing_type}/{tf}] Thread #{thread_counter}: {submission.title[:60]!r}")
+
+            try:
+                parts = []
+
+                # Post title + body
+                title = clean_text(submission.title)
+                body = clean_text(submission.selftext)
+
+                if title:
+                    parts.append(title)
+                if body:
+                    parts.append(body)
+
+                # Expand and collect comments
+                try:
+                    submission.comments.replace_more(limit=None)
+                except (RequestException, ResponseException, ServerError) as e:
+                    print(f"Error expanding comments on thread #{thread_counter}: {e}")
+                    safe_sleep(10)
+
+                for comment in submission.comments.list():
+                    if comment.body in ("[deleted]", "[removed]"):
+                        continue
+                    c_text = clean_text(comment.body)
+                    if c_text:
+                        parts.append(c_text)
+
+                # If we collected any text from this thread, add it as one big chunk
+                if parts:
+                    thread_text = "\n".join(parts)
+                    all_text_chunks.append(thread_text)
+
+            except (RequestException, ResponseException, ServerError) as e:
+                print(f"Network/API error on thread #{thread_counter}: {e}")
+                safe_sleep(20)
+                continue
+            except Exception as e:
+                print(f"Unexpected error on thread #{thread_counter}: {e}")
+                continue
+
+    print(f"\nFinished scraping. Unique threads collected: {len(all_text_chunks)}")
+    return all_text_chunks
+
+
+# ============================
+#   SAVING FUNCTIONS
+# ============================
+
+def save_as_txt(text_chunks, output_path: Path):
+    """
+    Save all collected text chunks into a single .txt corpus file.
+    Each thread separated by a blank line.
+    """
+    print(f"Saving text corpus to: {output_path}")
+    with output_path.open("w", encoding="utf-8") as f:
+        for chunk in text_chunks:
+            f.write(chunk)
+            f.write("\n\n")
+    print("Text corpus saved.")
+
+
+def save_as_docx(text_chunks, output_path: Path):
+    """
+    Save all collected text chunks into a Word document.
+    Each thread as a separate paragraph, separated by a line of dashes.
+    """
+    print(f"Saving Word corpus to: {output_path}")
+    doc = Document()
+    doc.add_heading(f"Reddit r/{SUBREDDIT_NAME} Corpus", level=1)
+
+    for i, chunk in enumerate(text_chunks, start=1):
+        doc.add_paragraph(chunk)
+        doc.add_paragraph("-" * 40)
+
+    doc.save(output_path)
+    print("Word corpus saved.")
+
+
+# ============================
+#   ENTRY POINT
+# ============================
+
+def main():
+    text_chunks = scrape_subreddit()
+    if not text_chunks:
+        print("No data scraped. Exiting.")
+        return
+
+    save_as_txt(text_chunks, OUTPUT_TXT)
+    save_as_docx(text_chunks, OUTPUT_DOCX)
+
+    # Quick word-count check
+    full_text = "\n\n".join(text_chunks)
+    word_count = len(full_text.split())
+    print(f"\nApproximate word count in corpus: {word_count}")
+    print("\n✅ All done!")
+
+
+if __name__ == "__main__":
+    main()
