@@ -1,0 +1,112 @@
+import os
+import re
+from pathlib import Path
+
+import spacy
+
+# ==========
+#  SETTINGS
+# ==========
+
+# Folder containing your raw corpus files
+# (adjust if needed)
+CORPUS_DIR = Path("/Users/user/Desktop/Other Docs/Bipolar Disorder")
+
+# Folder where cleaned files will be saved
+OUTPUT_DIR = CORPUS_DIR / "cleaned"
+
+# Create output directory if it doesn't exist
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Load spaCy English model
+nlp = spacy.load("en_core_web_sm")
+
+# Increase max_length to safely handle long posts if needed
+nlp.max_length = 20_000_000  # 20 million characters
+
+
+# ==========
+# FUNCTIONS
+# ==========
+
+def basic_clean(text: str) -> str:
+    """
+    Basic cleaning:
+    - lowercase
+    - remove URLs
+    - remove non-letter chars
+    - normalize whitespace
+    """
+    text = text.lower()
+    text = re.sub(r"http\S+", " ", text)      # remove URLs
+    text = re.sub(r"[^a-z\s]", " ", text)     # keep letters + spaces
+    text = re.sub(r"\s+", " ", text).strip()  # collapse spaces
+    return text
+
+
+def process_lines(lines):
+    """
+    Takes a list of raw lines (posts), cleans them,
+    runs them through spaCy in a pipeline, and returns
+    a list of cleaned, tokenised, lemmatised lines.
+    """
+    # First basic clean each line
+    cleaned_raw = [basic_clean(line) for line in lines if line.strip()]
+
+    cleaned_lines = []
+
+    # Use nlp.pipe for efficiency
+    for doc in nlp.pipe(cleaned_raw, batch_size=500):
+        tokens = [
+            token.lemma_
+            for token in doc
+            if token.is_alpha and not token.is_stop
+        ]
+        cleaned_line = " ".join(tokens)
+        cleaned_lines.append(cleaned_line)
+
+    return cleaned_lines
+
+
+def process_file(input_path: Path, output_path: Path):
+    """
+    Read one raw .txt file, preprocess line by line,
+    and save cleaned tokens with one cleaned post per line.
+    """
+    print(f"Processing: {input_path.name}")
+
+    # Read all lines (each line = a Reddit post, ideally)
+    with input_path.open("r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    cleaned_lines = process_lines(lines)
+
+    # Write cleaned posts back out, one per line
+    with output_path.open("w", encoding="utf-8") as f:
+        for cl in cleaned_lines:
+            f.write(cl + "\n")
+
+    print(f"Saved cleaned file to: {output_path}")
+
+
+# ==========
+#   MAIN
+# ==========
+
+def main():
+    # Get all .txt files in the corpus directory
+    txt_files = list(CORPUS_DIR.glob("*.txt"))
+
+    if not txt_files:
+        print(f"No .txt files found in {CORPUS_DIR}")
+        return
+
+    for txt_file in txt_files:
+        output_file = OUTPUT_DIR / f"{txt_file.stem}_cleaned.txt"
+        process_file(txt_file, output_file)
+
+    print("\n✅ Done! Cleaned files are in:", OUTPUT_DIR)
+
+
+if __name__ == "__main__":
+    main()
