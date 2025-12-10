@@ -1,0 +1,123 @@
+from pathlib import Path
+import csv
+
+# ======================
+#  FILE LOCATIONS
+# ======================
+
+CLEANED_DIR = Path("/Users/user/Desktop/Other Docs/Depression/cleaned")
+
+COLLOC_FILE = CLEANED_DIR / "emotion_collocates_depression.csv"
+
+NODES_FILE = CLEANED_DIR / "emotion_network_nodes.csv"
+EDGES_FILE = CLEANED_DIR / "emotion_network_edges.csv"
+
+
+# ======================
+#  MAIN LOGIC
+# ======================
+
+def build_network_files():
+    if not COLLOC_FILE.exists():
+        print(f"Collocate file not found: {COLLOC_FILE}")
+        return
+
+    # Data structures
+    # nodes_dict: label -> { "id": int, "type": "emotion"/"collocate", "frequency": int }
+    nodes_dict = {}
+    edges = []  # list of (source_label, target_label, weight)
+
+    next_id = 0
+
+    print(f"Reading collocate data from: {COLLOC_FILE}")
+
+    with COLLOC_FILE.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            emotion = row["emotion"].strip()
+            collocate = row["collocate"].strip()
+            freq_str = row["freq"].strip()
+
+            if not emotion or not collocate or not freq_str:
+                continue
+
+            try:
+                freq = int(freq_str)
+            except ValueError:
+                # skip rows with non-integer freq
+                continue
+
+            # Add / update emotion node
+            if emotion not in nodes_dict:
+                nodes_dict[emotion] = {
+                    "id": next_id,
+                    "label": emotion,
+                    "type": "emotion",
+                    "frequency": 0
+                }
+                next_id += 1
+            # Optionally accumulate frequency of occurrences linked to this emotion
+            nodes_dict[emotion]["frequency"] += freq
+
+            # Add / update collocate node
+            if collocate not in nodes_dict:
+                nodes_dict[collocate] = {
+                    "id": next_id,
+                    "label": collocate,
+                    "type": "collocate",
+                    "frequency": 0
+                }
+                next_id += 1
+            nodes_dict[collocate]["frequency"] += freq
+
+            # Store edge (emotion -> collocate, weight=freq)
+            edges.append((emotion, collocate, freq))
+
+    print(f"Total nodes: {len(nodes_dict)}")
+    print(f"Total edges (before merge): {len(edges)}")
+
+    # Optionally, combine duplicate edges (same emotion–collocate pair)
+    # in case your CSV ever has repeats
+    edge_dict = {}  # (emotion, collocate) -> total_weight
+    for emo_label, coll_label, w in edges:
+        key = (emo_label, coll_label)
+        edge_dict[key] = edge_dict.get(key, 0) + w
+
+    print(f"Total unique edges: {len(edge_dict)}")
+
+    # ======================
+    #  WRITE NODES FILE
+    # ======================
+    print(f"Writing nodes to: {NODES_FILE}")
+    with NODES_FILE.open("w", encoding="utf-8", newline="") as f_nodes:
+        writer = csv.writer(f_nodes)
+        # Gephi-friendly headers: id, label, type, frequency
+        writer.writerow(["id", "label", "type", "frequency"])
+
+        for node in nodes_dict.values():
+            writer.writerow([
+                node["id"],
+                node["label"],
+                node["type"],
+                node["frequency"]
+            ])
+
+    # ======================
+    #  WRITE EDGES FILE
+    # ======================
+    print(f"Writing edges to: {EDGES_FILE}")
+    with EDGES_FILE.open("w", encoding="utf-8", newline="") as f_edges:
+        writer = csv.writer(f_edges)
+        # Gephi-friendly headers: source, target, weight, type
+        writer.writerow(["source", "target", "weight", "type"])
+
+        for (emo_label, coll_label), weight in edge_dict.items():
+            source_id = nodes_dict[emo_label]["id"]
+            target_id = nodes_dict[coll_label]["id"]
+            writer.writerow([source_id, target_id, weight, "undirected"])
+
+    print("\n✅ Node and edge files created successfully.")
+
+
+if __name__ == "__main__":
+    build_network_files()
